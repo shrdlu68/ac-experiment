@@ -1,0 +1,6 @@
+My experiments in the problem-space of compression.
+This is an implementation of binary arithmetic coding[1] in Common Lisp.
+The code uses SBCL hash-tables extensions, and runs hopelessly slow on any implementation other than SBCL.
+
+The modeling and the encoding are decoupled, making it possible to test different models.
+For now the only test included is a simple Markov model with a naive context mixing approach.
