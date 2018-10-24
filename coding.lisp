@@ -5,7 +5,7 @@
 
 (ql:quickload :cl-mathstats)
 
-(rename-package :cl-mathstats :math)
+(declaim (optimize (compilation-speed 0)))
 
 (defparameter *float.5* (coerce 1/2 'short-float))
 (defparameter *float.1* (coerce 1/99 'short-float))
@@ -17,11 +17,19 @@
 (deftype octet-vector ()
   '(simple-array octet *))
 
+(deftype uint62v ()
+  '(simple-array uint62 *))
+
 (deftype uint64 ()
   '(unsigned-byte 64))
 
+(deftype uint62 ()
+  '(unsigned-byte 62))
+
 (deftype uint32 ()
   '(unsigned-byte 32))
+
+(load "uint8-bv.lisp")
 
 (defun percentage (m n)
   (* (float (/ m n)) 100))
@@ -84,84 +92,59 @@
 	(- mid scaled-gap)
 	(+ mid scaled-gap))))
 
-(declaim (inline pos-stats))
-(defun pos-stats (pos string &key (start 0))
-  (declare (type simple-bit-vector string)
-	   (type fixnum pos start))
-  (loop with counts of-type short-float = 0.0
-	with p0 of-type short-float = 0.0
-	for n fixnum from 8 to 8
-	when (zerop (mod pos n))
-	  do (loop for index fixnum from start by n below pos
-		   with total of-type short-float = 0.0
-		   with count0 of-type short-float = 0.0
-		   do (when (zerop (sbit string index))
-			(incf count0))
-		      (incf total)
-		   finally (and (plusp total)
-				(let* ((P (/ count0 total)))
-				  (when (or (> P 0.9)
-					    (< P 0.1))
-				    (incf p0 P)
-				    (incf counts)))))
-	finally (return (and (plusp counts)
-			     (/ p0 counts)))))
-
-(declaim (inline update-db))
+;; (declaim (inline update-db))
 (defun update-db (substring string markov-db &key end)
-  (declare (type simple-bit-vector string substring)
-	   (type hash-table markov-db)
+  (declare (optimize (speed 3) (safety 0) (space 0))
+	   (type simple-vector markov-db)
 	   (type fixnum end))
-  (let* ((db-entry (gethash substring markov-db))
-	 (bit (sbit string end))
-	 (len (length substring)))
+  (let* ((db-entry (access substring markov-db))
+	 (bit (uint62v-bit string end)))
     (declare (type (or null (simple-array short-float (2)))
 		   db-entry))
     (cond (db-entry
-	   (when (> (aref db-entry 1) (* len 5.0))
+	   (when (> (aref db-entry 1) (* (- (third substring) (second substring)) 5.0))
 	     (setf (aref db-entry 0) 1.0)
 	     (setf (aref db-entry 1) 2.0))
 	   (when (zerop bit)
 	     (incf (aref db-entry 0) 1.0))
 	   (incf (aref db-entry 1) 1.0)
-	   (setf (gethash substring markov-db) db-entry))
+	   (setf (access substring markov-db) db-entry))
 	  (t
-	   (setf (gethash substring markov-db)
+	   (setf (access substring markov-db)
 		 (if (zerop bit)
 		     (make-array 2 :element-type 'short-float :initial-contents '(1.0 1.0))
 		     (make-array 2 :element-type 'short-float :initial-contents '(0.0 1.0))))))))
 
 (defun smoothed-mean (mix)
-  (math:mean (loop for n  = mix then (butlast n (floor (length mix) 1.6))
+  (cl-mathstats:mean (loop for n  = mix then (butlast n (floor (length mix) 1.6))
 		   while n
-		   collecting (math:mean n))))
+		   collecting (cl-mathstats:mean n))))
 
-(declaim (inline predict))
+;; (declaim (inline predict))
 (defun predict (string markov-db &key (start 0) (end (length string)))
-  (declare (optimize (speed 3))
-	   (type simple-bit-vector string)
-	   (type hash-table markov-db)
-	   (type fixnum start end))
+  (declare (optimize (speed 3) (safety 0) (space 0))
+	   (type simple-vector markov-db)
+	   (type fixnum start end)
+	   (type uint62v string))
   (when (< end 1) (return-from predict *float.5*))
   ;; Update the DB
   (loop repeat 30
-	with update-end fixnum = (1- end)
-	with multiple = (- update-end (mod update-end 8))
-	for n fixnum downfrom (if (= multiple update-end)
-				  (- multiple 8) multiple) by 8
-	while (>= n start)
-	for substring of-type bit-vector = (subseq string n update-end)
-	do (update-db substring string markov-db :end update-end))
-  ;; Get stats
-  (let ((pos-stats (pos-stats end string))
-  	(mm-stats
+  	with update-end fixnum = (1- end)
+  	with multiple = (- update-end (mod update-end 8))
+  	for n fixnum downfrom (if (= multiple update-end)
+  				  (- multiple 8) multiple) above 0 by 8
+  	while (>= n start)
+  	for substring = (list string n update-end)
+  	do (update-db substring string markov-db :end update-end))
+  ;; get stats
+  (let ((mm-stats
   	  (loop with multiple = (- end (mod end 8))
 		for n fixnum downfrom (if (= multiple end)
-					  (- multiple 8) multiple) by 8
+					  (- multiple 8) multiple) above 0 by 8
 		while (>= n start)
 		with mix = nil
-  		while (let* ((substring (subseq string n end))
-  			     (db-entry (gethash substring markov-db))
+  		while (let* ((substring (list string n end))
+  			     (db-entry (access substring markov-db))
   			     (stats (and db-entry
   					 (/ (aref db-entry 0) (aref db-entry 1)))))
 			(declare (type (or null
@@ -173,17 +156,11 @@
 				     (cond ((< end 128)
 					    nil)
 					   ((< (length mix) 3)
-					    (downscale-P (math:mean mix) 0.9))
+					    (downscale-P (cl-mathstats:mean mix) 0.9))
 					   ((> (length mix) 3)
 					    (smoothed-mean mix))
 					   (t
-					    (math:mean mix))))))))
-    (cond ((and pos-stats
-		(or (zerop pos-stats)
-		    (= pos-stats 1)))
-	   (setf mm-stats pos-stats))
-	  ((and mm-stats pos-stats)
-	   (setf mm-stats (/ (the short-float (+ pos-stats (the short-float mm-stats))) 2))))
+					    (cl-mathstats:mean mix))))))))
     (cond ((null mm-stats) *float.5*)
 	  (t
 	   (cond ((zerop (the short-float mm-stats)) *float.1*)
@@ -224,13 +201,21 @@
 	  do (replace bv (int-to-bv uint8 8) :start1 a))
     bv))
 
-(defun encode-arithmetic (bv &key (predict #'predict) (start 0) (end (length bv)))
+(sb-ext:define-hash-table-test uint62bv= sxhash-bits)
+
+(defun encode-arithmetic (ov &key (predict #'predict) (start 0) (end (* 8 (length ov))))
   "The encoder: requires only the bit vector to be encoded as an argument"
-  (declare (type simple-bit-vector bv)
-	   (type fixnum start end))
+  (declare (optimize (speed 3) (safety 0) (space 0))
+	   (type fixnum start end)
+	   (type function predict))
   (let* ((len (the fixnum (- end start)))
-	 (output (make-array len :element-type 'bit :adjustable t :fill-pointer 0)))
-    (loop with markov-db of-type hash-table = (make-hash-table :test #'equal)
+	 (uint62v (ov-to-uint62v ov))
+	 (output (make-array 1000000 :element-type 'uint62))
+	 (output-index 0))
+    (declare (type uint62v uint62v output)
+	     (type uint62 output-index))
+    (loop with markov-db of-type simple-vector = (make-array (expt 2 25) :element-type
+							     'list :initial-element nil)
 	  with low of-type uint64 = 0
 	  with high of-type uint64 = (1- (expt 2 64))
 	  with half of-type uint64 = (* (expt 2 64) 1/2)
@@ -238,9 +223,9 @@
 	  with qtr3 of-type uint64 = (* (expt 2 64) 3/4)
 	  with follow-on of-type fixnum = 0
 	  for bit-index fixnum from start below end
-	  for bit of-type bit = (sbit bv bit-index)
+	  for bit of-type bit = (uint62v-bit uint62v bit-index)
 	  for range of-type uint64 = (- high low)
-	  for off-probability of-type short-float = (funcall predict bv markov-db :end bit-index)
+	  for off-probability of-type short-float = (funcall predict uint62v markov-db :end bit-index)
 	  for interval of-type uint64 = (+ low (floor (* range off-probability)))
 	  do (if (zerop bit)
 		 (setf high interval)
@@ -250,16 +235,18 @@
 			     (and (<= qtr low)
 				  (< high qtr3)))
 		   do (cond ((< high half)
-			     (vector-push-extend 0 output)
+			     (setf (uint62v-bit output (post-incf output-index)) 0)
 			     (when (plusp follow-on)
-			       (loop repeat follow-on do (vector-push-extend 1 output))
+			       (loop repeat follow-on do
+				 (setf (uint62v-bit output (post-incf output-index)) 1))
 			       (setf follow-on 0))
 			     (setf low (ash (ldb (byte 63 0) low) 1))
 			     (setf high (1+ (ash (ldb (byte 63 0) high) 1))))
 			    ((<= half low)
-			     (vector-push-extend 1 output)
+			     (setf (uint62v-bit output (post-incf output-index)) 1)
 			     (when (plusp follow-on)
-			       (loop repeat follow-on do (vector-push-extend 0 output))
+			       (loop repeat follow-on do
+				 (setf (uint62v-bit output (post-incf output-index)) 0))
 			       (setf follow-on 0))
 			     (setf low (ash (ldb (byte 63 0) low) 1))
 			     (setf high (1+ (ash (ldb (byte 63 0) high) 1))))
@@ -267,32 +254,41 @@
 			     (incf follow-on)
 			     (setf low (ash (ldb (byte 63 0) (- low qtr)) 1))
 			     (setf high (1+ (ash (ldb (byte 63 0) (- high qtr)) 1))))))
-	  finally (vector-push-extend 1 output))
-    (values (subseq output 0 (fill-pointer output)) len)))
+	  finally (setf (uint62v-bit output (post-incf output-index)) 1))
+    (setf output (adjust-array output (ceiling output-index 62)))
+    (values output len)))
 
-(defun decode-arithmetic (bv len &optional (predict #'predict))
+(defun decode-arithmetic (uint62v len &optional (predict #'predict))
   "The decoder: requires the output of the encoder and the length of the output"
-  (let* ((output (make-array len :element-type 'bit))
-	 (bv-len (length bv))
-	 (final-interval (bv-to-uint64 bv :start 0 :end 64))
+  (declare (optimize (speed 3) (safety 0) (space 0))
+	   (type uint62v uint62v)
+	   (type uint62 len)
+	   (type function predict))
+  (let* ((output (make-array (ceiling len 62) :element-type 'uint62 :initial-element 0))
+	 (bv-len (* 62 (length uint62v)))
+	 (final-interval (ash (aref uint62v 0) 2))
 	 (bv-pos 64))
     (declare (type uint64 final-interval bv-pos)
-	     (type simple-bit-vector output))
-    (loop with markov-db of-type hash-table = (make-hash-table :test #'equal)
+	     (type uint62v output))
+    (setf (ldb (byte 2 0) final-interval)
+	  (ldb (byte 2 60) (aref uint62v 1)))
+    (loop with markov-db of-type simple-vector = (make-array (expt 2 25) :element-type
+							      'list :initial-element nil)
 	  with low of-type uint64 = 0
 	  with high of-type uint64 = (1- (expt 2 64))
 	  with half of-type uint64 = (* (expt 2 64) 1/2)
 	  with qtr of-type uint64 = (* (expt 2 64) 1/4)
 	  with qtr3 of-type uint64 = (* (expt 2 64) 3/4)
 	  for range of-type uint64 = (- high low)
-	  for output-index from 0 below len
-	  for off-probability of-type short-float = (funcall predict output markov-db :end output-index)
+	  for output-index of-type uint62 from 0 below len
+	  for off-probability of-type short-float = (funcall predict output
+							     markov-db :end output-index)
 	  for interval of-type uint64 = (+ low (floor (* range off-probability)))
 	  do (cond ((<= final-interval interval)
-		    (setf (sbit output output-index) 0)
+		    (setf (uint62v-bit output output-index) 0)
 		    (setf high interval))
 		   ((<= interval final-interval)
-		    (setf (sbit output output-index) 1)
+		    (setf (uint62v-bit output output-index) 1)
 		    (setf low (1+ interval))))
 	     (loop while (or (< high half)
 			     (<= half low)
@@ -306,7 +302,7 @@
 			     (setf final-interval
 				   (logior (ash (ldb (byte 63 0) final-interval) 1)
 					   (if (< bv-pos bv-len)
-					       (sbit bv bv-pos)
+					       (uint62v-bit uint62v bv-pos)
 					       0))))
 			    (t
 			     (setf low (ash (ldb (byte 63 0) (- low qtr)) 1))
@@ -315,9 +311,10 @@
 			     (setf final-interval
 				   (logior (ash (ldb (byte 63 0) (- final-interval qtr)) 1)
 					   (if (< bv-pos bv-len)
-					       (sbit bv bv-pos)
+					       (uint62v-bit uint62v bv-pos)
 					       0)))))
-		      (incf bv-pos)))
+		      (incf bv-pos))
+	  finally (setf output (adjust-array output (ceiling output-index 62))))
     output))
 
 (defun test-random (len iterations)
@@ -333,16 +330,19 @@
 (defun test-file (path)
   "Test compression on file at path. Read it all to memory!"
   (let* ((ov (read-octets path))
-	 (bv (ov-to-bv ov))
-	 (in-len (length ov) )
-	 (compressed (encode-arithmetic bv))
-	 (out-len (round (/ (length compressed) 8)))
-	 (decompressed (decode-arithmetic compressed (* in-len 8))))
-    (if (equal decompressed bv)
+	 (in-len (length ov))
+	 (compressed (encode-arithmetic ov))
+	 (out-len (floor (* 62 (length compressed)) 8))
+	 (decompressed (decode-arithmetic compressed (* in-len 8)))
+	 (decompressed-ov (make-array in-len :element-type 'octet)))
+    (loop for index from 0 below (* in-len 8)
+	  do (setf (uint8v-bit decompressed-ov index)
+		   (uint62v-bit decompressed index)))
+    (if (null (mismatch ov decompressed-ov))
 	(format t "Test successful~%~
                    Input size: ~Ab~%~
                    Output size: ~Ab~%~
                    Compression ratio: ~A%~%"
 		in-len out-len
 		(round (* (/ (- in-len out-len) in-len) 100)))
-	(format t "Test failed at ~A of ~A~%" (mismatch bv decompressed) (length bv)))))
+	(format t "Test failed at ~A of ~A~%" (mismatch ov decompressed) in-len))))
