@@ -116,7 +116,7 @@
 		     (make-array 2 :element-type 'short-float :initial-contents '(0.0 1.0))))))))
 
 (defun smoothed-mean (mix)
-  (cl-mathstats:mean (loop for n  = mix then (butlast n (floor (length mix) 1.6))
+  (cl-mathstats:mean (loop for n  = mix then (butlast n 1)
 		   while n
 		   collecting (cl-mathstats:mean n))))
 
@@ -157,10 +157,8 @@
 					    nil)
 					   ((< (length mix) 3)
 					    (downscale-P (cl-mathstats:mean mix) 0.9))
-					   ((> (length mix) 3)
-					    (smoothed-mean mix))
 					   (t
-					    (cl-mathstats:mean mix))))))))
+					    (smoothed-mean mix))))))))
     (cond ((null mm-stats) *float.5*)
 	  (t
 	   (cond ((zerop (the short-float mm-stats)) *float.1*)
